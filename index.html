@@ -1,0 +1,80 @@
+const FUGLE_TOKEN = "MTY4MDk1NGMtMWJhNS00OGZjLWEwYjEtNmE2ZTIxOWY1ZjA4IGNjNjJmNjI0LWE4ZmItNDgwNy1iMTgxLTUzZWEyNzdmNDZmZg==";
+
+export default async function handler(req, res) {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  if (req.method === "OPTIONS") return res.status(200).end();
+
+  const { type, stockCode, date } = req.query;
+  const today = date || new Date().toISOString().slice(0,10).replace(/-/g,"");
+
+  try {
+    // Fugle K線
+    if (type === "kline") {
+      const r = await fetch(
+        `https://api.fugle.tw/marketdata/v1.0/stock/historical/candles?symbol=${stockCode}&timeframe=D&limit=60`,
+        { headers: { "X-API-KEY": FUGLE_TOKEN } }
+      );
+      const j = await r.json();
+      const candles = (j.data||[]).map(d=>({
+        date: d.date, open: d.open, high: d.high,
+        low: d.low, close: d.close, vol: d.volume
+      })).reverse();
+      return res.json({ candles });
+    }
+
+    // Fugle 即時報價
+    if (type === "quote") {
+      const r = await fetch(
+        `https://api.fugle.tw/marketdata/v1.0/stock/intraday/quote?symbol=${stockCode}`,
+        { headers: { "X-API-KEY": FUGLE_TOKEN } }
+      );
+      const j = await r.json();
+      return res.json({
+        price: j.closePrice || j.lastPrice || 0,
+        changePct: j.changePercent || 0,
+        volume: j.volume || 0,
+        high: j.highPrice || 0,
+        low: j.lowPrice || 0,
+        open: j.openPrice || 0,
+      });
+    }
+
+    // 三大法人
+    if (type === "institutional") {
+      const r = await fetch(`https://www.twse.com.tw/rwd/zh/fund/T86?response=json&date=${today}&selectType=ALLBUT`,
+        { headers: { "User-Agent": "Mozilla/5.0" } });
+      const d = await r.json();
+      const row = d.data?.find(r => r[0] === stockCode);
+      if (!row) return res.json({ error: "not found" });
+      return res.json({
+        foreign: parseNum(row[4]), invest: parseNum(row[7]), dealer: parseNum(row[10]),
+        total: parseNum(row[4]) + parseNum(row[7]) + parseNum(row[10])
+      });
+    }
+
+    // 融資融券
+    if (type === "margin") {
+      const r = await fetch(`https://www.twse.com.tw/rwd/zh/marginTrading/MI_MARGN?response=json&date=${today}&selectType=STOCK`,
+        { headers: { "User-Agent": "Mozilla/5.0" } });
+      const d = await r.json();
+      const row = d.data?.find(r => r[0] === stockCode);
+      if (!row) return res.json({ error: "not found" });
+      return res.json({
+        marginBalance: parseNum(row[3]), marginBuy: parseNum(row[4]),
+        shortBalance: parseNum(row[8]), shortSell: parseNum(row[9])
+      });
+    }
+
+    return res.status(400).json({ error: "Unknown type" });
+  } catch(e) {
+    return res.status(500).json({ error: e.message });
+  }
+}
+
+function parseNum(str) {
+  if (!str) return 0;
+  const n = parseInt(str.toString().replace(/,/g,"").replace(/\+/g,""));
+  return isNaN(n) ? 0 : n;
+}

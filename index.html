@@ -1,0 +1,783 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>TWSTOCK Analytics</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;700&family=Noto+Sans+TC:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+*{box-sizing:border-box;margin:0;padding:0;}
+body{background:#0a0c0f;color:#e8edf5;font-family:'Noto Sans TC',sans-serif;-webkit-tap-highlight-color:transparent;}
+::-webkit-scrollbar{width:3px;}
+::-webkit-scrollbar-track{background:#0f1318;}
+::-webkit-scrollbar-thumb{background:#1e2d3d;border-radius:2px;}
+@keyframes pulse{0%,100%{opacity:.3;transform:scale(.8)}50%{opacity:1;transform:scale(1)}}
+@keyframes fadeIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
+@keyframes slideUp{from{opacity:0;transform:translateY(20px)}to{opacity:1;transform:translateY(0)}}
+@keyframes scan{0%{left:-100%}100%{left:100%}}
+select{appearance:none;-webkit-appearance:none;}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const PROXY = "https://twstock-proxy-psi.vercel.app/api/proxy";
+const GEMINI_KEY = "AQ.Ab8RN6K2NWcJRLONDXCbmgjg7N7XUwyGqmc3xLSpUWI9gP6RLQ";
+const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_KEY}`;
+
+const C = {
+  bg0:"#0a0c0f",bg1:"#0f1318",bg2:"#141921",bg3:"#1c2330",
+  bd:"#1e2d3d",
+  ac:"#f0a500",acD:"#f0a50022",
+  g:"#00d084",gD:"#00d08422",
+  r:"#ff3d57",rD:"#ff3d5722",
+  b:"#2196f3",bD:"#2196f322",
+  p:"#9c6eff",o:"#ff7043",
+  t0:"#e8edf5",t1:"#8fa3b8",t2:"#4a6080",
+};
+
+const DEFAULT_STOCKS = [
+  {code:"2330",name:"台積電",theme:"AI晶片"},
+  {code:"6669",name:"緯穎",theme:"AI伺服器"},
+  {code:"3711",name:"日月光投控",theme:"CoWoS封裝"},
+  {code:"2454",name:"聯發科",theme:"AI晶片"},
+  {code:"2634",name:"漢翔",theme:"軍工航太"},
+  {code:"6282",name:"康舒",theme:"儲能電池"},
+];
+
+const THEMES = [
+  {name:"AI伺服器",stocks:["6669","2330","3711"]},
+  {name:"CoWoS封裝",stocks:["2454","3034","6770"]},
+  {name:"電動車",stocks:["2207","1590","6239"]},
+  {name:"軍工航太",stocks:["1722","2634","2609"]},
+  {name:"散熱模組",stocks:["3443","6230","8383"]},
+  {name:"儲能電池",stocks:["1513","6282","3691"]},
+];
+
+// ── 技術指標 ───────────────────────────────────────────────
+function calcMA(closes,p){return closes.map((_,i)=>i<p-1?null:closes.slice(i-p+1,i+1).reduce((a,b)=>a+b,0)/p);}
+function calcEMA(data,p){const k=2/(p+1);let e=null;return data.map(v=>{if(v==null)return null;if(e===null)e=v;else e=v*k+e*(1-k);return e;});}
+function calcRSI(closes,p=14){
+  if(closes.length<p+1)return[];
+  const res=new Array(p).fill(null);let ag=0,al=0;
+  for(let i=1;i<=p;i++){const d=closes[i]-closes[i-1];if(d>0)ag+=d;else al+=Math.abs(d);}
+  ag/=p;al/=p;res.push(al===0?100:100-(100/(1+ag/al)));
+  for(let i=p+1;i<closes.length;i++){const d=closes[i]-closes[i-1];ag=(ag*(p-1)+(d>0?d:0))/p;al=(al*(p-1)+(d<0?Math.abs(d):0))/p;res.push(al===0?100:100-(100/(1+ag/al)));}
+  return res;
+}
+function calcMACD(closes){
+  const e12=calcEMA(closes,12),e26=calcEMA(closes,26);
+  const ml=e12.map((v,i)=>v&&e26[i]?v-e26[i]:null);
+  const valid=ml.filter(v=>v!==null);const sigRaw=calcEMA(valid,9);
+  let si=0;const sig=ml.map(v=>v===null?null:sigRaw[si++]??null);
+  return{ml,sig,hist:ml.map((v,i)=>v&&sig[i]?v-sig[i]:null)};
+}
+function calcKD(data,p=9){
+  let k=50,d=50;
+  return data.map((_,i)=>{
+    if(i<p-1)return{k:null,d:null};
+    const sl=data.slice(i-p+1,i+1);
+    const hi=Math.max(...sl.map(x=>x.high)),lo=Math.min(...sl.map(x=>x.low));
+    const rsv=hi===lo?50:((data[i].close-lo)/(hi-lo))*100;
+    k=k*2/3+rsv/3;d=d*2/3+k/3;return{k,d};
+  });
+}
+function calcBB(closes,p=20,m=2){
+  return closes.map((_,i)=>{
+    if(i<p-1)return{mid:null,upper:null,lower:null};
+    const sl=closes.slice(i-p+1,i+1);
+    const mid=sl.reduce((a,b)=>a+b,0)/p;
+    const std=Math.sqrt(sl.reduce((s,v)=>s+(v-mid)**2,0)/p);
+    return{mid,upper:mid+m*std,lower:mid-m*std};
+  });
+}
+function calcWeeklyRSI(data){
+  if(!data||data.length<15)return null;
+  const weekly=[];
+  for(let i=0;i<data.length;i+=5){const sl=data.slice(i,i+5);if(sl.length<3)break;weekly.push(sl[sl.length-1].close);}
+  const rsi=calcRSI(weekly,9);return rsi.filter(v=>v!==null).slice(-1)[0];
+}
+function calcConsecutive(arr){
+  if(!arr||!arr.length)return{days:0,dir:"—"};
+  const last=arr[arr.length-1];if(last==null)return{days:0,dir:"—"};
+  const dir=last>=0?"買超":"賣超";let days=0;
+  for(let i=arr.length-1;i>=0;i--){if(arr[i]==null)break;if((dir==="買超"&&arr[i]>=0)||(dir==="賣超"&&arr[i]<0))days++;else break;}
+  return{days,dir};
+}
+function detectDivergence(data){
+  if(!data||data.length<10)return[];
+  const signals=[];
+  for(let i=5;i<data.length;i++){
+    const pC=(data[i].close-data[i-5].close)/data[i-5].close;
+    const vC=(data[i].vol-data[i-5].vol)/data[i-5].vol;
+    if(pC>0.03&&vC<-0.3)signals.push({type:"頂背離",color:C.r});
+    else if(pC<-0.03&&vC<-0.3)signals.push({type:"底背離",color:C.g});
+  }
+  return signals.slice(-2);
+}
+
+// ── 評分系統 ───────────────────────────────────────────────
+function scoreStock(quote, kline, inst) {
+  if(!kline||kline.length<20)return{score:0,details:[]};
+  const closes=kline.map(d=>d.close);
+  const price=quote?.price||closes[closes.length-1];
+  const rsi=calcRSI(closes);
+  const weekRSI=calcWeeklyRSI(kline);
+  const macd=calcMACD(closes);
+  const kd=calcKD(kline);
+  const bb=calcBB(closes);
+  const ma5=calcMA(closes,5);const ma20=calcMA(closes,20);const ma60=calcMA(closes,60);
+
+  const lastRSI=rsi.filter(v=>v!==null).slice(-1)[0];
+  const lastKD=kd.filter(d=>d.k!==null).slice(-1)[0];
+  const lastMACD=macd.ml.filter(v=>v!==null).slice(-1)[0];
+  const lastHist=macd.hist.filter(v=>v!==null).slice(-1)[0];
+  const prevHist=macd.hist.filter(v=>v!==null).slice(-2)[0];
+  const lastBB=bb.filter(v=>v.mid!==null).slice(-1)[0];
+  const lma5=ma5.filter(v=>v!==null).slice(-1)[0];
+  const lma20=ma20.filter(v=>v!==null).slice(-1)[0];
+  const lma60=ma60.filter(v=>v!==null).slice(-1)[0];
+  const divs=detectDivergence(kline);
+
+  let score=0;const details=[];
+
+  // 1. 週線RSI（20分）
+  if(weekRSI!=null){
+    if(weekRSI>=30&&weekRSI<=55){score+=20;details.push({label:"週RSI低檔",value:weekRSI.toFixed(1),color:C.g,pts:20});}
+    else if(weekRSI<30){score+=15;details.push({label:"週RSI超賣",value:weekRSI.toFixed(1),color:C.g,pts:15});}
+    else if(weekRSI>70){score-=5;details.push({label:"週RSI超買",value:weekRSI.toFixed(1),color:C.r,pts:-5});}
+    else{details.push({label:"週RSI中性",value:weekRSI.toFixed(1),color:C.t2,pts:0});}
+  }
+
+  // 2. 外資連買（20分）
+  if(inst&&!inst.error){
+    const fdays=calcConsecutive([inst.foreign]).days;
+    if(inst.foreign>0&&fdays>=3){score+=20;details.push({label:`外資連買${fdays}天`,value:`+${inst.foreign.toLocaleString()}`,color:C.g,pts:20});}
+    else if(inst.foreign>0){score+=12;details.push({label:"外資今日買超",value:`+${inst.foreign.toLocaleString()}`,color:C.g,pts:12});}
+    else if(inst.foreign<0){score-=5;details.push({label:"外資賣超",value:inst.foreign.toLocaleString(),color:C.r,pts:-5});}
+  }
+
+  // 3. MACD柱狀翻正（15分）
+  if(lastHist!=null&&prevHist!=null){
+    if(lastHist>0&&prevHist<=0){score+=15;details.push({label:"MACD剛翻正",value:"黃金交叉",color:C.g,pts:15});}
+    else if(lastHist>0&&lastHist>prevHist){score+=8;details.push({label:"MACD擴張中",value:"多頭",color:C.g,pts:8});}
+    else if(lastHist<0){details.push({label:"MACD空頭",value:"負值",color:C.r,pts:0});}
+  }
+
+  // 4. 布林通道位置（15分）
+  if(lastBB&&lastBB.upper!==lastBB.lower){
+    const bbPct=(price-lastBB.lower)/(lastBB.upper-lastBB.lower)*100;
+    const bbWidth=(lastBB.upper-lastBB.lower)/lastBB.mid*100;
+    if(bbPct<25){score+=15;details.push({label:"近布林下軌",value:`${bbPct.toFixed(0)}%`,color:C.g,pts:15});}
+    else if(bbPct>75){score-=5;details.push({label:"近布林上軌",value:`${bbPct.toFixed(0)}%`,color:C.r,pts:-5});}
+    if(bbWidth<3){score+=8;details.push({label:"布林帶收窄",value:"即將突破",color:C.ac,pts:8});}
+  }
+
+  // 5. 均線多頭排列（15分）
+  if(lma5&&lma20&&lma60){
+    if(lma5>lma20&&lma20>lma60){score+=15;details.push({label:"均線多頭排列",value:"MA5>20>60",color:C.g,pts:15});}
+    else if(lma5>lma20){score+=5;details.push({label:"短線偏多",value:"MA5>20",color:C.g,pts:5});}
+    else if(lma5<lma20&&lma20<lma60){score-=5;details.push({label:"均線空頭",value:"MA5<20<60",color:C.r,pts:-5});}
+  }
+
+  // 6. 融資比率（15分）
+  // 用日線RSI輔助判斷
+  if(lastRSI!=null){
+    if(lastRSI<40){score+=10;details.push({label:"日RSI低檔",value:lastRSI.toFixed(1),color:C.g,pts:10});}
+    else if(lastRSI>70){score-=5;details.push({label:"日RSI超買",value:lastRSI.toFixed(1),color:C.r,pts:-5});}
+  }
+
+  // 7. KD低檔（10分）
+  if(lastKD?.k!=null){
+    if(lastKD.k<30){score+=10;details.push({label:"KD超賣",value:`K:${lastKD.k.toFixed(0)}`,color:C.g,pts:10});}
+    else if(lastKD.k>80){score-=5;details.push({label:"KD超買",value:`K:${lastKD.k.toFixed(0)}`,color:C.r,pts:-5});}
+  }
+
+  // 8. 量價背離（加減分）
+  if(divs.length>0){
+    const last=divs[divs.length-1];
+    if(last.type==="底背離"){score+=8;details.push({label:"底背離",value:"量縮價穩",color:C.g,pts:8});}
+    else if(last.type==="頂背離"){score-=8;details.push({label:"頂背離",value:"量縮價漲",color:C.r,pts:-8});}
+  }
+
+  // 投信買超加分
+  if(inst&&inst.invest>0){score+=5;details.push({label:"投信買超",value:`+${inst.invest}`,color:C.b,pts:5});}
+
+  score=Math.max(0,Math.min(100,score));
+  return{score,details,lastRSI,weekRSI,lastKD,lastMACD,lastHist,bbPct:lastBB?((price-lastBB.lower)/(lastBB.upper-lastBB.lower)*100):null};
+}
+
+// ── API ────────────────────────────────────────────────────
+async function apiGet(type,code){
+  try{const r=await fetch(`${PROXY}?type=${type}&stockCode=${code}`);return await r.json();}
+  catch(e){return null;}
+}
+
+// ── useStock ───────────────────────────────────────────────
+function useStock(code){
+  const [quote,setQ]=React.useState(null);
+  const [kline,setK]=React.useState(null);
+  const [inst,setI]=React.useState(null);
+  const [mgn,setM]=React.useState(null);
+  const [loading,setL]=React.useState(true);
+  const load=React.useCallback(async()=>{
+    setL(true);
+    const [q,k,i,m]=await Promise.all([apiGet("quote",code),apiGet("kline",code),apiGet("institutional",code),apiGet("margin",code)]);
+    if(q)setQ(q);if(k&&k.candles)setK(k.candles.map(c=>({...c,date:new Date(c.date)})));if(i)setI(i);if(m)setM(m);
+    setL(false);
+  },[code]);
+  React.useEffect(()=>{load();},[load]);
+  React.useEffect(()=>{const t=setInterval(async()=>{const q=await apiGet("quote",code);if(q)setQ(q);},60000);return()=>clearInterval(t);},[code]);
+  return{quote,kline,inst,mgn,loading,reload:load};
+}
+
+// ── Canvas Charts ──────────────────────────────────────────
+function useCanvas(fn,deps){
+  const ref=React.useRef(null);
+  React.useEffect(()=>{
+    if(!ref.current)return;
+    const c=ref.current,dpr=window.devicePixelRatio||1;
+    const rect=c.getBoundingClientRect();if(!rect.width)return;
+    c.width=rect.width*dpr;c.height=rect.height*dpr;
+    const ctx=c.getContext("2d");ctx.scale(dpr,dpr);
+    fn(ctx,rect.width,rect.height);
+  },deps);
+  return ref;
+}
+
+function KChart({data,bb}){
+  const ref=useCanvas((ctx,W,H)=>{
+    const pL=8,pR=54,pT=24,pB=40,cW=W-pL-pR,cH=(H-pT-pB)*0.65,vH=(H-pT-pB)*0.25;
+    ctx.fillStyle=C.bg1;ctx.fillRect(0,0,W,H);
+    const ps=data.flatMap(d=>[d.high,d.low]);
+    const mn=Math.min(...ps)*0.996,mx=Math.max(...ps)*1.004,mv=Math.max(...data.map(d=>d.vol||1));
+    const xS=i=>pL+(i/(data.length-1))*cW,yS=p=>pT+cH-((p-mn)/(mx-mn))*cH,vS=v=>H-pB-(v/mv)*vH;
+    ctx.strokeStyle=C.bd;ctx.lineWidth=0.5;
+    for(let i=0;i<=4;i++){const y=pT+(i/4)*cH;ctx.beginPath();ctx.moveTo(pL,y);ctx.lineTo(W-pR,y);ctx.stroke();ctx.fillStyle=C.t2;ctx.font="9px IBM Plex Mono";ctx.textAlign="left";ctx.fillText((mx-(i/4)*(mx-mn)).toFixed(1),W-pR+4,y+3);}
+    if(bb){
+      ctx.strokeStyle=C.p+"66";ctx.lineWidth=1;ctx.setLineDash([3,3]);
+      ["upper","mid","lower"].forEach(key=>{ctx.beginPath();let f=true;bb.forEach((b,i)=>{if(!b[key])return;const x=xS(i),y=yS(b[key]);if(f){ctx.moveTo(x,y);f=false;}else ctx.lineTo(x,y);});ctx.stroke();});
+      ctx.setLineDash([]);ctx.beginPath();ctx.globalAlpha=0.04;let f2=true;
+      bb.forEach((b,i)=>{if(!b.upper)return;if(f2){ctx.moveTo(xS(i),yS(b.upper));f2=false;}else ctx.lineTo(xS(i),yS(b.upper));});
+      bb.slice().reverse().forEach((b,i)=>{if(!b.lower)return;ctx.lineTo(xS(bb.length-1-i),yS(b.lower));});
+      ctx.fillStyle=C.p;ctx.fill();ctx.globalAlpha=1;
+    }
+    [[5,C.ac],[20,C.b],[60,C.p]].forEach(([period,col])=>{
+      if(data.length<period)return;const ma=calcMA(data.map(d=>d.close),period);
+      ctx.strokeStyle=col;ctx.lineWidth=1.5;ctx.globalAlpha=0.85;ctx.beginPath();let f=true;
+      ma.forEach((v,i)=>{if(v===null)return;const x=xS(i),y=yS(v);if(f){ctx.moveTo(x,y);f=false;}else ctx.lineTo(x,y);});ctx.stroke();ctx.globalAlpha=1;
+    });
+    const bw=Math.max(3,cW/data.length-1.5);
+    data.forEach((d,i)=>{
+      const x=xS(i),up=d.close>=d.open;ctx.strokeStyle=up?C.g:C.r;ctx.fillStyle=up?C.g:C.r;ctx.lineWidth=1;
+      ctx.beginPath();ctx.moveTo(x,yS(d.high));ctx.lineTo(x,yS(d.low));ctx.stroke();
+      ctx.globalAlpha=up?0.9:0.8;ctx.fillRect(x-bw/2,yS(Math.max(d.open,d.close)),bw,Math.max(1.5,Math.abs(yS(d.open)-yS(d.close))));ctx.globalAlpha=1;
+      ctx.fillStyle=up?C.g:C.r;ctx.globalAlpha=0.4;const top=vS(d.vol||0);ctx.fillRect(x-bw/2,top,bw,H-pB-top);ctx.globalAlpha=1;
+    });
+    [["MA5",C.ac],["MA20",C.b],["MA60",C.p],["BB",C.p+"88"]].forEach(([l,col],i)=>{ctx.fillStyle=col;ctx.font="bold 10px IBM Plex Mono";ctx.textAlign="left";ctx.fillText(l,pL+i*38,pT-7);});
+    const step=Math.ceil(data.length/5);ctx.fillStyle=C.t2;ctx.font="9px IBM Plex Mono";ctx.textAlign="center";
+    data.forEach((d,i)=>{if(i%step===0)ctx.fillText(`${d.date.getMonth()+1}/${d.date.getDate()}`,xS(i),H-pB+14);});
+  },[data,bb]);
+  return React.createElement("canvas",{ref,style:{width:"100%",height:"100%",display:"block"}});
+}
+
+function RSIChart({data,weekRSI}){
+  const ref=useCanvas((ctx,W,H)=>{
+    const pL=8,pR=38,pT=12,pB=20,cW=W-pL-pR,cH=H-pT-pB;
+    ctx.fillStyle=C.bg2;ctx.fillRect(0,0,W,H);
+    [30,50,70].forEach(v=>{const y=pT+cH-(v/100)*cH;ctx.strokeStyle=v===50?C.bd:`${v===70?C.r:C.g}55`;ctx.lineWidth=0.8;ctx.setLineDash(v===50?[]:[4,4]);ctx.beginPath();ctx.moveTo(pL,y);ctx.lineTo(W-pR,y);ctx.stroke();ctx.setLineDash([]);ctx.fillStyle=v===70?C.r:v===30?C.g:C.t2;ctx.font="9px IBM Plex Mono";ctx.textAlign="left";ctx.fillText(v,W-pR+3,y+3);});
+    ctx.strokeStyle=C.p;ctx.lineWidth=2;ctx.beginPath();let f=true;
+    data.forEach((v,i)=>{if(v===null)return;const x=pL+(i/(data.length-1))*cW,y=pT+cH-(v/100)*cH;if(f){ctx.moveTo(x,y);f=false;}else ctx.lineTo(x,y);});ctx.stroke();
+    const last=data.filter(v=>v!==null).slice(-1)[0];
+    if(last!=null){const li=data.lastIndexOf(last),lx=pL+(li/(data.length-1))*cW,ly=pT+cH-(last/100)*cH;ctx.fillStyle=last>70?C.r:last<30?C.g:C.p;ctx.beginPath();ctx.arc(lx,ly,5,0,Math.PI*2);ctx.fill();ctx.fillStyle=C.t0;ctx.font="bold 11px IBM Plex Mono";ctx.textAlign="right";ctx.fillText(`日${last.toFixed(1)}`,W-2,ly+4);}
+    if(weekRSI!=null){ctx.fillStyle=C.ac;ctx.font="bold 10px IBM Plex Mono";ctx.textAlign="left";ctx.fillText(`週RSI:${weekRSI.toFixed(1)}`,pL,pT+10);}
+  },[data,weekRSI]);
+  return React.createElement("canvas",{ref,style:{width:"100%",height:"100%",display:"block"}});
+}
+
+function MACDChart({ml,sig,hist}){
+  const ref=useCanvas((ctx,W,H)=>{
+    const pL=8,pR=38,pT=10,pB=20,cW=W-pL-pR,cH=H-pT-pB;
+    ctx.fillStyle=C.bg2;ctx.fillRect(0,0,W,H);
+    const vals=[...ml,...sig,...hist].filter(v=>v!==null);if(!vals.length)return;
+    const mn=Math.min(...vals),mx=Math.max(...vals),range=mx-mn||1;
+    const yS=v=>pT+cH-((v-mn)/range)*cH,xS=i=>pL+(i/(ml.length-1))*cW,zy=yS(0);
+    ctx.strokeStyle=C.bd;ctx.lineWidth=0.8;ctx.beginPath();ctx.moveTo(pL,zy);ctx.lineTo(W-pR,zy);ctx.stroke();
+    const bw=Math.max(2,cW/ml.length-1);
+    hist.forEach((v,i)=>{if(v===null)return;ctx.fillStyle=v>=0?C.g:C.r;ctx.globalAlpha=0.65;ctx.fillRect(xS(i)-bw/2,Math.min(yS(v),zy),bw,Math.abs(yS(v)-zy));ctx.globalAlpha=1;});
+    [[ml,C.b],[sig,C.r]].forEach(([arr,col])=>{ctx.strokeStyle=col;ctx.lineWidth=1.5;ctx.beginPath();let f=true;arr.forEach((v,i)=>{if(v===null)return;if(f){ctx.moveTo(xS(i),yS(v));f=false;}else ctx.lineTo(xS(i),yS(v));});ctx.stroke();});
+    const lm=ml.filter(v=>v!==null).slice(-1)[0];if(lm!=null){ctx.fillStyle=lm>0?C.g:C.r;ctx.font="bold 10px IBM Plex Mono";ctx.textAlign="right";ctx.fillText(`${lm>0?"+":""}${lm.toFixed(2)}`,W-2,pT+10);}
+  },[ml,sig,hist]);
+  return React.createElement("canvas",{ref,style:{width:"100%",height:"100%",display:"block"}});
+}
+
+function KDChart({kdData}){
+  const ref=useCanvas((ctx,W,H)=>{
+    const pL=8,pR=38,pT=10,pB=20,cW=W-pL-pR,cH=H-pT-pB;
+    ctx.fillStyle=C.bg2;ctx.fillRect(0,0,W,H);
+    [20,50,80].forEach(v=>{const y=pT+cH-(v/100)*cH;ctx.strokeStyle=v===50?C.bd:`${v===80?C.r:C.g}44`;ctx.lineWidth=0.8;ctx.setLineDash(v===50?[]:[4,4]);ctx.beginPath();ctx.moveTo(pL,y);ctx.lineTo(W-pR,y);ctx.stroke();ctx.setLineDash([]);ctx.fillStyle=v===80?C.r:v===20?C.g:C.t2;ctx.font="9px IBM Plex Mono";ctx.textAlign="left";ctx.fillText(v,W-pR+3,y+3);});
+    const xS=i=>pL+(i/(kdData.length-1))*cW;
+    [[kdData.map(d=>d.k),C.ac],[kdData.map(d=>d.d),C.b]].forEach(([arr,col])=>{ctx.strokeStyle=col;ctx.lineWidth=2;ctx.beginPath();let f=true;arr.forEach((v,i)=>{if(v===null)return;const x=xS(i),y=pT+cH-(v/100)*cH;if(f){ctx.moveTo(x,y);f=false;}else ctx.lineTo(x,y);});ctx.stroke();});
+    const lk=kdData.filter(d=>d.k!==null).slice(-1)[0];if(lk){ctx.fillStyle=C.t0;ctx.font="bold 10px IBM Plex Mono";ctx.textAlign="right";ctx.fillText(`K:${lk.k.toFixed(0)} D:${lk.d.toFixed(0)}`,W-2,pT+10);}
+  },[kdData]);
+  return React.createElement("canvas",{ref,style:{width:"100%",height:"100%",display:"block"}});
+}
+
+// ── AI Panel ───────────────────────────────────────────────
+function AIPanel({stock,quote,kline,inst,onClose}){
+  const [msgs,setMsgs]=React.useState([]);
+  const [input,setInp]=React.useState("");
+  const [loading,setLd]=React.useState(true);
+  const bottomRef=React.useRef(null);
+
+  React.useEffect(()=>{
+    (async()=>{
+      if(!kline||kline.length<20){setMsgs([{role:"ai",content:"K線資料不足，請稍後再試。"}]);setLd(false);return;}
+      const closes=kline.map(d=>d.close);
+      const rsi=calcRSI(closes),weekRSI=calcWeeklyRSI(kline);
+      const macd=calcMACD(closes),kd=calcKD(kline),bb=calcBB(closes);
+      const divs=detectDivergence(kline);
+      const scored=scoreStock(quote,kline,inst);
+      const lastRSI=rsi.filter(v=>v!==null).slice(-1)[0];
+      const lastKD=kd.filter(d=>d.k!==null).slice(-1)[0];
+      const lastMACD=macd.ml.filter(v=>v!==null).slice(-1)[0];
+      const lastBB=bb.filter(v=>v.mid!==null).slice(-1)[0];
+      const price=quote?.price||0;
+      const bbPct=lastBB?((price-lastBB.lower)/(lastBB.upper-lastBB.lower)*100).toFixed(0):null;
+
+      const prompt=`你是頂尖台股分析師，繁體中文，精準有洞察力，250字內。
+
+【股票】${stock.code} ${stock.name}（${stock.theme}）
+【現價】${price}　漲跌 ${quote?.changePct??'N/A'}%
+【智能評分】${scored.score}/100分
+
+【技術指標】
+- 日線RSI(14): ${lastRSI?.toFixed(1)??'N/A'}
+- 週線RSI: ${weekRSI?.toFixed(1)??'N/A'}
+- KD: K=${lastKD?.k?.toFixed(1)??'N/A'} D=${lastKD?.d?.toFixed(1)??'N/A'}
+- MACD: ${lastMACD?.toFixed(3)??'N/A'}
+- 布林通道位置: ${bbPct??'N/A'}%（0%=下軌 100%=上軌）
+- 量價訊號: ${divs.length?divs.map(s=>s.type).join('、'):'無背離'}
+
+【法人籌碼】
+- 外資: ${inst?.foreign??'N/A'}張
+- 投信: ${inst?.invest??'N/A'}張
+- 三大合計: ${inst?.total??'N/A'}張
+
+【評分明細】${scored.details.map(d=>`${d.label}(${d.pts>0?'+':''}${d.pts})`).join('、')}
+
+請分析：1)綜合技術面訊號 2)籌碼解讀 3)短中期操作建議含進場條件和停損`;
+
+      try{
+        const r=await fetch(GEMINI_URL,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({contents:[{parts:[{text:prompt}]}]})});
+        const j=await r.json();
+        setMsgs([{role:"ai",content:j.candidates?.[0]?.content?.parts?.[0]?.text||"無法取得分析"}]);
+      }catch{setMsgs([{role:"ai",content:"⚠️ 連線失敗"}]);}
+      setLd(false);
+    })();
+  },[]);
+
+  React.useEffect(()=>{bottomRef.current?.scrollIntoView({behavior:"smooth"});},[msgs,loading]);
+
+  const ask=async()=>{
+    if(!input.trim())return;const q=input.trim();setInp("");
+    setMsgs(prev=>[...prev,{role:"user",content:q}]);setLd(true);
+    try{
+      const r=await fetch(GEMINI_URL,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({contents:[{parts:[{text:`台股分析師，繁體中文，100字內。${stock.code} ${stock.name}，現價${quote?.price}。問：${q}`}]}]})});
+      const j=await r.json();setMsgs(prev=>[...prev,{role:"ai",content:j.candidates?.[0]?.content?.parts?.[0]?.text||"無法回應"}]);
+    }catch{setMsgs(prev=>[...prev,{role:"ai",content:"⚠️連線錯誤"}]);}
+    setLd(false);
+  };
+
+  return React.createElement("div",{style:{position:"fixed",inset:0,background:"#00000090",zIndex:100,display:"flex",alignItems:"flex-end",justifyContent:"center"}},
+    React.createElement("div",{style:{width:"100%",maxWidth:540,maxHeight:"82vh",background:C.bg1,borderRadius:"16px 16px 0 0",border:`1px solid ${C.bd}`,display:"flex",flexDirection:"column",overflow:"hidden",animation:"slideUp 0.3s ease"}},
+      React.createElement("div",{style:{padding:"16px",borderBottom:`1px solid ${C.bd}`,display:"flex",justifyContent:"space-between",alignItems:"center"}},
+        React.createElement("div",null,
+          React.createElement("div",{style:{fontSize:15,fontWeight:700,color:C.ac}},"🤖 AI 綜合分析"),
+          React.createElement("div",{style:{fontSize:12,color:C.t2}},`${stock.code} ${stock.name} · Gemini 2.0`)
+        ),
+        React.createElement("button",{onClick:onClose,style:{background:C.bg3,border:`1px solid ${C.bd}`,borderRadius:8,padding:"6px 14px",color:C.t1,cursor:"pointer",fontSize:14}},"關閉")
+      ),
+      React.createElement("div",{style:{flex:1,overflowY:"auto",padding:16,display:"flex",flexDirection:"column",gap:12}},
+        msgs.map((m,i)=>React.createElement("div",{key:i,style:{display:"flex",justifyContent:m.role==="user"?"flex-end":"flex-start"}},
+          React.createElement("div",{style:{maxWidth:"90%",padding:"12px 14px",borderRadius:12,fontSize:14,lineHeight:1.8,background:m.role==="user"?C.acD:C.bg3,border:`1px solid ${m.role==="user"?C.ac+"44":C.bd}`,color:m.role==="user"?C.ac:C.t0,whiteSpace:"pre-wrap"}},m.content)
+        )),
+        loading&&React.createElement("div",{style:{display:"flex",gap:5,padding:10,alignItems:"center"}},[0,1,2].map(i=>React.createElement("div",{key:i,style:{width:7,height:7,borderRadius:"50%",background:C.ac,animation:`pulse 1.2s ${i*0.2}s ease-in-out infinite`}})),React.createElement("span",{style:{fontSize:12,color:C.t2,marginLeft:6}},"分析中...")),
+        React.createElement("div",{ref:bottomRef})
+      ),
+      React.createElement("div",{style:{padding:"12px 16px",borderTop:`1px solid ${C.bd}`,display:"flex",gap:8}},
+        React.createElement("input",{value:input,onChange:e=>setInp(e.target.value),onKeyDown:e=>e.key==="Enter"&&ask(),placeholder:"繼續追問...",style:{flex:1,background:C.bg3,border:`1px solid ${C.bd}`,borderRadius:10,padding:"10px 14px",color:C.t0,fontSize:14,fontFamily:"inherit",outline:"none"}}),
+        React.createElement("button",{onClick:ask,disabled:loading||!input.trim(),style:{background:C.ac,border:"none",borderRadius:10,padding:"10px 18px",color:"#000",fontWeight:700,fontSize:14,cursor:"pointer",opacity:loading?0.5:1}},"送出")
+      )
+    )
+  );
+}
+
+// ── 智能選股頁面 ───────────────────────────────────────────
+function SmartScan({list,onSelectStock}){
+  const [scanning,setScanning]=React.useState(false);
+  const [results,setResults]=React.useState([]);
+  const [progress,setProgress]=React.useState({current:0,total:0,name:""});
+  const [scanTime,setScanTime]=React.useState(null);
+  const [expandIdx,setExpandIdx]=React.useState(null);
+
+  const runScan=async()=>{
+    setScanning(true);setResults([]);setScanTime(null);setExpandIdx(null);
+    const total=list.length;setProgress({current:0,total,name:""});
+    const res=[];
+    for(let i=0;i<list.length;i++){
+      const stock=list[i];
+      setProgress({current:i+1,total,name:stock.name});
+      const [q,k,inst]=await Promise.all([apiGet("quote",stock.code),apiGet("kline",stock.code),apiGet("institutional",stock.code)]);
+      const kline=k?.candles?.map(c=>({...c,date:new Date(c.date)}));
+      const scored=scoreStock(q,kline||[],inst);
+      const weekRSI=kline?calcWeeklyRSI(kline):null;
+      const closes=kline?kline.map(d=>d.close):[];
+      const macd=closes.length>=26?calcMACD(closes):{ml:[],hist:[]};
+      const lastHist=macd.hist.filter(v=>v!==null).slice(-1)[0];
+      res.push({
+        stock,quote:q,kline,inst,scored,weekRSI,
+        macdDir:lastHist>0?"多頭":"空頭",
+        changePct:q?.changePct||0,
+      });
+    }
+    res.sort((a,b)=>b.scored.score-a.scored.score);
+    setResults(res);setScanning(false);setScanTime(new Date());
+  };
+
+  const scoreColor=s=>s>=70?C.g:s>=50?C.ac:s>=30?C.t1:C.r;
+  const scoreLabel=s=>s>=70?"🔥強力推薦":s>=55?"👍值得關注":s>=40?"👀觀察中":"⬇️避開";
+
+  return React.createElement("div",{style:{padding:"16px",animation:"fadeIn 0.3s ease"}},
+
+    // 標題
+    React.createElement("div",{style:{background:C.bg1,border:`1px solid ${C.bd}`,borderRadius:12,padding:"16px",marginBottom:16}},
+      React.createElement("div",{style:{display:"flex",alignItems:"center",gap:10,marginBottom:8}},
+        React.createElement("div",{style:{fontSize:22}},"🔍"),
+        React.createElement("div",null,
+          React.createElement("div",{style:{fontSize:17,fontWeight:700,color:C.t0}},"AI 智能選股"),
+          React.createElement("div",{style:{fontSize:12,color:C.t2}},`掃描 ${list.length} 檔自選股 · 多維度評分排行`)
+        )
+      ),
+      React.createElement("div",{style:{fontSize:12,color:C.t2,marginBottom:14,lineHeight:1.8}},
+        "評分條件：週RSI位置 · 外資籌碼 · MACD動能 · 布林通道 · 均線排列 · 量價背離"
+      ),
+      React.createElement("button",{onClick:runScan,disabled:scanning,
+        style:{width:"100%",background:scanning?C.bg3:`linear-gradient(135deg,${C.ac},#ff6b35)`,border:`1px solid ${scanning?C.bd:"transparent"}`,borderRadius:10,padding:"14px",color:scanning?C.t2:"#000",fontWeight:700,fontSize:16,cursor:scanning?"not-allowed":"pointer",fontFamily:"inherit",position:"relative",overflow:"hidden"}},
+        scanning?`掃描中 ${progress.current}/${progress.total}　${progress.name}...`:"🚀 開始掃描"
+      ),
+      scanning&&React.createElement("div",{style:{marginTop:10}},
+        React.createElement("div",{style:{background:C.bg3,borderRadius:6,height:6,overflow:"hidden"}},
+          React.createElement("div",{style:{height:"100%",width:`${progress.total?progress.current/progress.total*100:0}%`,background:`linear-gradient(90deg,${C.ac},${C.g})`,borderRadius:6,transition:"width 0.3s"}})
+        ),
+        React.createElement("div",{style:{fontSize:11,color:C.t2,marginTop:5,textAlign:"center"}},`正在分析 ${progress.name}...`)
+      )
+    ),
+
+    // 結果
+    results.length>0&&React.createElement("div",null,
+      React.createElement("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}},
+        React.createElement("div",{style:{fontSize:14,fontWeight:700,color:C.t0}},`掃描完成 · 共 ${results.length} 檔`),
+        scanTime&&React.createElement("div",{style:{fontSize:11,color:C.t2}},`${scanTime.getHours()}:${String(scanTime.getMinutes()).padStart(2,"0")} 更新`)
+      ),
+
+      results.map((r,idx)=>React.createElement("div",{key:r.stock.code,style:{background:C.bg1,border:`1px solid ${idx===0?C.ac+"66":C.bd}`,borderRadius:12,marginBottom:10,overflow:"hidden",animation:`fadeIn 0.3s ${idx*0.05}s ease both`}},
+
+        // 主行
+        React.createElement("div",{
+          style:{padding:"14px 16px",cursor:"pointer"},
+          onClick:()=>setExpandIdx(expandIdx===idx?null:idx)
+        },
+          React.createElement("div",{style:{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10}},
+            React.createElement("div",{style:{display:"flex",alignItems:"center",gap:12}},
+              // 名次
+              React.createElement("div",{style:{width:28,height:28,borderRadius:"50%",background:idx<3?[C.ac,C.t1+"55","#cd7f3255"][idx]:C.bg3,display:"flex",alignItems:"center",justifyContent:"center",fontSize:13,fontWeight:700,color:idx<3?"#000":C.t2}},idx+1),
+              React.createElement("div",null,
+                React.createElement("div",{style:{fontSize:15,fontWeight:700,color:C.t0}},`${r.stock.code} ${r.stock.name}`),
+                React.createElement("div",{style:{fontSize:11,color:C.t2,marginTop:1}},r.stock.theme)
+              )
+            ),
+            React.createElement("div",{style:{textAlign:"right"}},
+              r.quote&&React.createElement("div",{style:{fontSize:16,fontWeight:700,fontFamily:"IBM Plex Mono",color:C.t0}},(r.quote.price||0).toLocaleString()),
+              r.quote&&React.createElement("div",{style:{fontSize:12,color:(r.changePct||0)>=0?C.g:C.r}},`${(r.changePct||0)>=0?"▲":"▼"}${Math.abs(r.changePct||0).toFixed(2)}%`)
+            )
+          ),
+
+          // 評分條
+          React.createElement("div",{style:{display:"flex",alignItems:"center",gap:10,marginBottom:8}},
+            React.createElement("div",{style:{flex:1,background:C.bg3,borderRadius:6,height:10,overflow:"hidden"}},
+              React.createElement("div",{style:{height:"100%",width:`${r.scored.score}%`,background:`linear-gradient(90deg,${scoreColor(r.scored.score)},${scoreColor(r.scored.score)}88)`,borderRadius:6,transition:"width 0.8s ease"}})
+            ),
+            React.createElement("div",{style:{fontSize:18,fontWeight:700,color:scoreColor(r.scored.score),fontFamily:"IBM Plex Mono",minWidth:36}},r.scored.score),
+            React.createElement("div",{style:{fontSize:12}},scoreLabel(r.scored.score))
+          ),
+
+          // 快速指標
+          React.createElement("div",{style:{display:"flex",gap:6,flexWrap:"wrap"}},
+            r.weekRSI!=null&&React.createElement("span",{style:{background:r.weekRSI<40?C.gD:r.weekRSI>70?C.rD:C.bg3,border:`1px solid ${r.weekRSI<40?C.g+"44":r.weekRSI>70?C.r+"44":C.bd}`,borderRadius:6,padding:"2px 8px",fontSize:11,color:r.weekRSI<40?C.g:r.weekRSI>70?C.r:C.t2}},`週RSI ${r.weekRSI.toFixed(1)}`),
+            r.inst&&!r.inst.error&&React.createElement("span",{style:{background:(r.inst.foreign||0)>=0?C.gD:C.rD,border:`1px solid ${(r.inst.foreign||0)>=0?C.g+"44":C.r+"44"}`,borderRadius:6,padding:"2px 8px",fontSize:11,color:(r.inst.foreign||0)>=0?C.g:C.r}},`外資${(r.inst.foreign||0)>=0?"買":"賣"}${Math.abs(r.inst.foreign||0).toLocaleString()}`),
+            React.createElement("span",{style:{background:r.macdDir==="多頭"?C.gD:C.rD,border:`1px solid ${r.macdDir==="多頭"?C.g+"44":C.r+"44"}`,borderRadius:6,padding:"2px 8px",fontSize:11,color:r.macdDir==="多頭"?C.g:C.r}},`MACD ${r.macdDir}`),
+            React.createElement("span",{style:{background:C.bg3,border:`1px solid ${C.bd}`,borderRadius:6,padding:"2px 8px",fontSize:11,color:C.t2}},"▾ 展開詳情")
+          )
+        ),
+
+        // 展開詳情
+        expandIdx===idx&&React.createElement("div",{style:{borderTop:`1px solid ${C.bd}`,padding:"14px 16px",background:C.bg2}},
+          React.createElement("div",{style:{fontSize:12,color:C.t2,marginBottom:8,fontFamily:"IBM Plex Mono"}},"評分明細"),
+          React.createElement("div",{style:{display:"flex",flexWrap:"wrap",gap:6,marginBottom:14}},
+            r.scored.details.map((d,i)=>React.createElement("span",{key:i,style:{background:d.color+"22",border:`1px solid ${d.color}44`,borderRadius:6,padding:"3px 8px",fontSize:11,color:d.color}},
+              `${d.label} ${d.pts>0?"+":""}${d.pts}`
+            ))
+          ),
+          React.createElement("div",{style:{display:"flex",gap:8}},
+            React.createElement("button",{
+              onClick:()=>{onSelectStock(r.stock,r);},
+              style:{flex:1,background:C.bg3,border:`1px solid ${C.bd}`,borderRadius:8,padding:"10px",color:C.t1,fontSize:13,cursor:"pointer",fontFamily:"inherit"}
+            },"📊 查看K線"),
+            React.createElement("button",{
+              onClick:()=>{onSelectStock(r.stock,r,true);},
+              style:{flex:1,background:`linear-gradient(135deg,${C.ac},#ff6b35)`,border:"none",borderRadius:8,padding:"10px",color:"#000",fontWeight:700,fontSize:13,cursor:"pointer"}
+            },"🤖 AI分析")
+          )
+        )
+      ))
+    ),
+
+    // 空狀態
+    !scanning&&results.length===0&&React.createElement("div",{style:{textAlign:"center",padding:"40px 20px",color:C.t2}},
+      React.createElement("div",{style:{fontSize:48,marginBottom:16}},"🔍"),
+      React.createElement("div",{style:{fontSize:15,marginBottom:8,color:C.t1}},"點擊開始掃描"),
+      React.createElement("div",{style:{fontSize:12}},"AI 將自動分析所有自選股\n並按潛力評分排行")
+    )
+  );
+}
+
+// ── Detail ─────────────────────────────────────────────────
+function Detail({stock,initShowAI=false}){
+  const {quote,kline,inst,mgn,loading,reload}=useStock(stock.code);
+  const [showAI,setShowAI]=React.useState(initShowAI);
+  const [chartTab,setChartTab]=React.useState("kline");
+
+  const closes=kline?kline.map(d=>d.close):[];
+  const rsi=closes.length>=15?calcRSI(closes):[];
+  const weekRSI=kline?calcWeeklyRSI(kline):null;
+  const macd=closes.length>=26?calcMACD(closes):{ml:[],sig:[],hist:[]};
+  const kd=kline?calcKD(kline):[];
+  const bb=closes.length>=20?calcBB(closes):[];
+  const divSignals=kline?detectDivergence(kline):[];
+  const scored=scoreStock(quote,kline||[],inst);
+
+  const lastRSI=rsi.filter(v=>v!==null).slice(-1)[0];
+  const lastKD=kd.filter(d=>d.k!==null).slice(-1)[0];
+  const lastMACD=macd.ml.filter(v=>v!==null).slice(-1)[0];
+  const lastBB=bb.filter(v=>v.mid!==null).slice(-1)[0];
+  const price=quote?.price||0;
+  const bbPct=lastBB&&lastBB.upper!==lastBB.lower?((price-lastBB.lower)/(lastBB.upper-lastBB.lower)*100):null;
+  const sc=v=>v>70?C.r:v<30?C.g:C.t0;
+
+  return React.createElement("div",{style:{display:"flex",flexDirection:"column",gap:0,padding:"0 16px 32px",animation:"fadeIn 0.3s ease"}},
+    // 標題
+    React.createElement("div",{style:{background:C.bg1,border:`1px solid ${C.bd}`,borderRadius:12,padding:"16px",marginBottom:12}},
+      React.createElement("div",{style:{display:"flex",alignItems:"flex-start",justifyContent:"space-between",marginBottom:12}},
+        React.createElement("div",null,
+          React.createElement("div",{style:{fontSize:26,fontWeight:700,color:C.t0,fontFamily:"IBM Plex Mono"}},stock.code),
+          React.createElement("div",{style:{fontSize:16,color:C.t1,marginTop:2}},stock.name),
+          React.createElement("div",{style:{display:"flex",gap:8,marginTop:6,alignItems:"center"}},
+            React.createElement("span",{style:{background:C.bD,border:`1px solid ${C.b}44`,borderRadius:6,padding:"3px 10px",color:C.b,fontSize:12}},stock.theme),
+            !loading&&kline&&React.createElement("span",{style:{background:scored.score>=70?C.gD:scored.score>=50?C.acD:C.rD,border:`1px solid ${scored.score>=70?C.g+"44":scored.score>=50?C.ac+"44":C.r+"44"}`,borderRadius:6,padding:"3px 10px",fontSize:12,fontWeight:700,color:scored.score>=70?C.g:scored.score>=50?C.ac:C.r,fontFamily:"IBM Plex Mono"}},`評分 ${scored.score}`)
+          )
+        ),
+        quote?React.createElement("div",{style:{textAlign:"right"}},
+          React.createElement("div",{style:{fontSize:32,fontWeight:700,fontFamily:"IBM Plex Mono",color:C.t0}},(quote.price||0).toLocaleString()),
+          React.createElement("div",{style:{fontSize:17,fontWeight:700,color:(quote.changePct||0)>=0?C.g:C.r}},`${(quote.changePct||0)>=0?"▲":"▼"}${Math.abs(quote.changePct||0).toFixed(2)}%`)
+        ):loading&&React.createElement("div",{style:{fontSize:13,color:C.t2}},"載入中...")
+      ),
+      React.createElement("div",{style:{display:"flex",gap:8}},
+        React.createElement("button",{onClick:reload,style:{flex:1,background:C.bg3,border:`1px solid ${C.bd}`,borderRadius:8,padding:"10px",color:C.t1,fontSize:14,cursor:"pointer"}},"↻ 更新"),
+        React.createElement("button",{onClick:()=>setShowAI(true),disabled:loading||!kline||kline.length<20,
+          style:{flex:2,background:`linear-gradient(135deg,${C.ac},#ff6b35)`,border:"none",borderRadius:8,padding:"10px",color:"#000",fontWeight:700,fontSize:14,cursor:"pointer",opacity:loading||!kline||kline.length<20?0.5:1}},
+          "🤖 AI 綜合分析")
+      )
+    ),
+    quote&&React.createElement("div",{style:{display:"flex",gap:8,marginBottom:12}},
+      ...[["開盤",(quote.open||0).toLocaleString(),C.t0],["最高",(quote.high||0).toLocaleString(),C.g],["最低",(quote.low||0).toLocaleString(),C.r]].map(([l,v,c])=>
+        React.createElement("div",{key:l,style:{flex:1,background:C.bg1,border:`1px solid ${C.bd}`,borderRadius:10,padding:"10px",textAlign:"center"}},
+          React.createElement("div",{style:{fontSize:11,color:C.t2,marginBottom:3}},l),
+          React.createElement("div",{style:{fontSize:15,fontWeight:700,color:c,fontFamily:"IBM Plex Mono"}},v)
+        )
+      )
+    ),
+    !loading&&kline&&React.createElement("div",{style:{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:12}},
+      ...[
+        ["日RSI",lastRSI?.toFixed(1)??"—",sc(lastRSI),lastRSI>70?"超買":lastRSI<30?"超賣":"中性"],
+        ["週RSI",weekRSI?.toFixed(1)??"—",sc(weekRSI),weekRSI>70?"超買":weekRSI<30?"超賣":"中性"],
+        ["K值",lastKD?.k?.toFixed(1)??"—",lastKD?.k>80?C.r:lastKD?.k<20?C.g:C.t0,lastKD?.k>80?"超買":lastKD?.k<20?"超賣":"中性"],
+        ["MACD",lastMACD?.toFixed(2)??"—",lastMACD>0?C.g:C.r,lastMACD>0?"多頭":"空頭"],
+        ["BB位置",bbPct!=null?`${bbPct.toFixed(0)}%`:"—",bbPct>80?C.r:bbPct<20?C.g:C.t0,bbPct>80?"近上軌":bbPct<20?"近下軌":"中間"],
+        ["量價",divSignals.length?divSignals[divSignals.length-1].type:"正常",divSignals.length?divSignals[divSignals.length-1].color:C.t0,divSignals.length?divSignals[divSignals.length-1].type:"無背離"],
+      ].map(([label,value,color,signal])=>
+        React.createElement("div",{key:label,style:{background:C.bg1,border:`1px solid ${C.bd}`,borderRadius:10,padding:"10px 8px",textAlign:"center"}},
+          React.createElement("div",{style:{fontSize:10,color:C.t2,marginBottom:3,fontFamily:"IBM Plex Mono"}},label),
+          React.createElement("div",{style:{fontSize:15,fontWeight:700,color,fontFamily:"IBM Plex Mono"}},value),
+          React.createElement("div",{style:{fontSize:10,color,marginTop:2}},signal)
+        )
+      )
+    ),
+    inst&&!inst.error&&React.createElement("div",{style:{background:C.bg1,border:`1px solid ${C.bd}`,borderRadius:10,padding:"12px 14px",marginBottom:12,display:"flex",gap:12}},
+      ...[["外資",(inst.foreign||0),(inst.foreign||0)>=0?C.g:C.r],["投信",(inst.invest||0),(inst.invest||0)>=0?C.g:C.r],["合計",(inst.total||0),(inst.total||0)>=0?C.g:C.r]].map(([l,v,c])=>
+        React.createElement("div",{key:l,style:{flex:1,textAlign:"center"}},
+          React.createElement("div",{style:{fontSize:11,color:C.t2,marginBottom:4}},l),
+          React.createElement("div",{style:{fontSize:14,fontWeight:700,color:c,fontFamily:"IBM Plex Mono"}},`${v>=0?"+":""}${v.toLocaleString()}`),
+          React.createElement("div",{style:{fontSize:10,color:C.t2}},"張")
+        )
+      )
+    ),
+    React.createElement("div",{style:{display:"flex",gap:6,marginBottom:8}},
+      [["kline","K線+BB"],["rsi","RSI"],["macd","MACD"],["kd","KD"]].map(([id,label])=>
+        React.createElement("button",{key:id,onClick:()=>setChartTab(id),style:{flex:1,background:chartTab===id?C.acD:C.bg3,border:`1px solid ${chartTab===id?C.ac+"55":C.bd}`,borderRadius:8,padding:"7px 2px",color:chartTab===id?C.ac:C.t2,fontSize:12,cursor:"pointer",fontFamily:"IBM Plex Mono",fontWeight:chartTab===id?700:400}},label)
+      )
+    ),
+    React.createElement("div",{style:{background:C.bg1,border:`1px solid ${C.bd}`,borderRadius:12,overflow:"hidden",marginBottom:12}},
+      React.createElement("div",{style:{padding:"10px 14px",borderBottom:`1px solid ${C.bd}`,fontSize:12,color:C.t2,fontFamily:"IBM Plex Mono"}},
+        {kline:"日K線 + 布林通道 + MA5/20/60",rsi:`RSI(14) 日線${lastRSI?.toFixed(1)??"—"} 週線${weekRSI?.toFixed(1)??"—"}`,macd:"MACD (12,26,9)",kd:`KD (9) K:${lastKD?.k?.toFixed(1)??"—"}`}[chartTab]
+      ),
+      React.createElement("div",{style:{height:chartTab==="kline"?300:200}},
+        loading?React.createElement("div",{style:{display:"flex",alignItems:"center",justifyContent:"center",height:"100%",gap:6}},[0,1,2].map(i=>React.createElement("div",{key:i,style:{width:7,height:7,borderRadius:"50%",background:C.ac,animation:`pulse 1.2s ${i*0.2}s ease-in-out infinite`}}))):
+        !kline||kline.length===0?React.createElement("div",{style:{display:"flex",alignItems:"center",justifyContent:"center",height:"100%",color:C.t2,fontSize:13}},"無資料"):
+        chartTab==="kline"?React.createElement(KChart,{data:kline,bb}):
+        chartTab==="rsi"?React.createElement(RSIChart,{data:rsi,weekRSI}):
+        chartTab==="macd"?React.createElement(MACDChart,{...macd}):
+        React.createElement(KDChart,{kdData:kd})
+      )
+    ),
+    React.createElement("div",{style:{background:C.bg1,border:`1px solid ${C.bd}`,borderRadius:12,padding:"14px"}},
+      React.createElement("div",{style:{fontSize:12,color:C.t2,marginBottom:12,fontFamily:"IBM Plex Mono"}},"▍ 融資融券"),
+      loading?React.createElement("div",{style:{display:"flex",gap:5}},[0,1,2].map(i=>React.createElement("div",{key:i,style:{width:7,height:7,borderRadius:"50%",background:C.ac,animation:`pulse 1.2s ${i*0.2}s ease-in-out infinite`}}))):
+      mgn&&!mgn.error?React.createElement(React.Fragment,null,
+        React.createElement("div",{style:{display:"flex",gap:10,marginBottom:10}},
+          ...[["融資",mgn.marginBalance||0,C.b],["融券",mgn.shortBalance||0,C.o]].map(([l,v,c])=>
+            React.createElement("div",{key:l,style:{flex:1,background:C.bg2,borderRadius:10,padding:"10px",textAlign:"center"}},
+              React.createElement("div",{style:{fontSize:11,color:C.t2,marginBottom:3}},`${l}餘額`),
+              React.createElement("div",{style:{fontSize:18,fontWeight:700,color:c,fontFamily:"IBM Plex Mono"}},v.toLocaleString()),
+              React.createElement("div",{style:{fontSize:10,color:C.t2}},"張")
+            )
+          )
+        ),
+        (()=>{const tot=(mgn.marginBalance||0)+(mgn.shortBalance||0);const ratio=tot>0?((mgn.marginBalance||0)/tot*100).toFixed(1):0;
+          return React.createElement("div",null,
+            React.createElement("div",{style:{display:"flex",justifyContent:"space-between",marginBottom:5}},
+              React.createElement("span",{style:{fontSize:13,color:C.t2}},"融資比率"),
+              React.createElement("span",{style:{fontSize:14,fontWeight:700,color:+ratio>70?C.r:C.t0,fontFamily:"IBM Plex Mono"}},`${ratio}%　${+ratio>70?"⚠️過熱":+ratio<40?"籌碼乾淨":"正常"}`)
+            ),
+            React.createElement("div",{style:{background:C.bg3,borderRadius:6,height:10,overflow:"hidden"}},
+              React.createElement("div",{style:{height:"100%",width:`${ratio}%`,background:+ratio>70?`linear-gradient(90deg,${C.o},${C.r})`:`linear-gradient(90deg,${C.b},${C.g})`,borderRadius:6}})
+            )
+          );
+        })()
+      ):React.createElement("div",{style:{fontSize:13,color:C.t2,lineHeight:2}},"今日無資料",React.createElement("br"),React.createElement("span",{style:{fontSize:11}},"收盤後 18:30 更新"))
+    ),
+    showAI&&React.createElement(AIPanel,{stock,quote,kline,inst,onClose:()=>setShowAI(false)})
+  );
+}
+
+// ── App ────────────────────────────────────────────────────
+function App(){
+  const [tab,setTab]=React.useState("chart");
+  const [sel,setSel]=React.useState(DEFAULT_STOCKS[0]);
+  const [list,setList]=React.useState(DEFAULT_STOCKS);
+  const [inp,setInp]=React.useState("");
+  const [showAdd,setAdd]=React.useState(false);
+  const [showEdit,setEdit]=React.useState(false);
+  const [adding,setAdding]=React.useState(false);
+  const [initAI,setInitAI]=React.useState(false);
+
+  const addStock=async()=>{
+    const code=inp.trim().toUpperCase();
+    if(!code)return;
+    if(list.find(s=>s.code===code)){const s=list.find(x=>x.code===code);setSel(s);setInp("");setAdd(false);return;}
+    setAdding(true);
+    const ns={code,name:"查詢中...",theme:"自選"};
+    setList(p=>[...p,ns]);setSel(ns);setTab("chart");setInp("");setAdd(false);setAdding(false);
+    const q=await apiGet("quote",code);
+    const name=q?.shortName||q?.longName||code;
+    setList(p=>p.map(s=>s.code===code?{...s,name}:s));
+    setSel(p=>p.code===code?{...p,name}:p);
+  };
+
+  const removeStock=code=>{
+    if(DEFAULT_STOCKS.find(s=>s.code===code))return;
+    const nl=list.filter(s=>s.code!==code);setList(nl);
+    if(sel.code===code)setSel(nl[0]||DEFAULT_STOCKS[0]);
+  };
+
+  const onSelectFromScan=(stock,_data,openAI=false)=>{
+    setSel(stock);setInitAI(openAI);setTab("chart");
+  };
+
+  return React.createElement("div",{style:{minHeight:"100vh",background:C.bg0,color:C.t0,fontFamily:"'Noto Sans TC',sans-serif",maxWidth:540,margin:"0 auto"}},
+
+    React.createElement("header",{style:{background:C.bg1,borderBottom:`1px solid ${C.bd}`,padding:"12px 16px",position:"sticky",top:0,zIndex:50}},
+      React.createElement("div",{style:{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10}},
+        React.createElement("div",{style:{display:"flex",alignItems:"center",gap:8}},
+          React.createElement("div",{style:{width:3,height:20,background:C.ac,borderRadius:2}}),
+          React.createElement("span",{style:{fontSize:17,fontWeight:700,fontFamily:"IBM Plex Mono"}},"TWSTOCK"),
+          React.createElement("span",{style:{background:C.gD,border:`1px solid ${C.g}44`,borderRadius:4,padding:"1px 7px",fontSize:10,color:C.g}},"LIVE")
+        ),
+        React.createElement("span",{style:{fontSize:10,color:C.t2}},"Yahoo · 證交所 · Gemini AI")
+      ),
+      React.createElement("div",{style:{display:"flex",gap:6}},
+        [["chart","📊 分析"],["scan","🔍 選股"],["themes","🔥 題材"]].map(([id,label])=>
+          React.createElement("button",{key:id,onClick:()=>setTab(id),style:{flex:1,background:tab===id?C.acD:"none",border:`1px solid ${tab===id?C.ac+"55":C.bd}`,borderRadius:8,padding:"9px 4px",color:tab===id?C.ac:C.t2,fontSize:13,cursor:"pointer",fontFamily:"inherit",fontWeight:tab===id?700:400}},label)
+        )
+      )
+    ),
+
+    tab==="chart"&&React.createElement("div",{style:{padding:"12px 16px",background:C.bg2,borderBottom:`1px solid ${C.bd}`}},
+      React.createElement("div",{style:{display:"flex",gap:8,marginBottom:showAdd||showEdit?10:0}},
+        React.createElement("div",{style:{flex:1,position:"relative"}},
+          React.createElement("select",{value:sel.code,onChange:e=>{const s=list.find(x=>x.code===e.target.value);if(s){setSel(s);setInitAI(false);}setEdit(false);setAdd(false);},
+            style:{width:"100%",background:C.bg3,border:`1px solid ${C.bd}`,borderRadius:8,padding:"11px 36px 11px 14px",color:C.t0,fontSize:15,fontFamily:"inherit",cursor:"pointer",outline:"none"}},
+            list.map(s=>React.createElement("option",{key:s.code,value:s.code,style:{background:C.bg1}},`${s.code}　${s.name}`))
+          ),
+          React.createElement("span",{style:{position:"absolute",right:12,top:"50%",transform:"translateY(-50%)",color:C.t2,pointerEvents:"none",fontSize:12}},"▼")
+        ),
+        React.createElement("button",{onClick:()=>{setEdit(!showEdit);setAdd(false);},style:{background:showEdit?C.acD:C.bg3,border:`1px solid ${showEdit?C.ac:C.bd}`,borderRadius:8,padding:"11px 14px",color:showEdit?C.ac:C.t1,fontSize:13,cursor:"pointer"}},showEdit?"完成":"編輯"),
+        React.createElement("button",{onClick:()=>{setAdd(!showAdd);setEdit(false);},style:{background:C.ac,border:"none",borderRadius:8,padding:"11px 16px",color:"#000",fontWeight:700,fontSize:18,cursor:"pointer"}},"+")
+      ),
+      showAdd&&React.createElement("div",{style:{display:"flex",gap:8}},
+        React.createElement("input",{value:inp,onChange:e=>setInp(e.target.value),onKeyDown:e=>e.key==="Enter"&&addStock(),placeholder:"輸入股票代碼（如 2330）",autoFocus:true,style:{flex:1,background:C.bg3,border:`1px solid ${C.ac}`,borderRadius:8,padding:"11px 14px",color:C.t0,fontSize:15,fontFamily:"inherit",outline:"none"}}),
+        React.createElement("button",{onClick:addStock,disabled:adding||!inp.trim(),style:{background:C.ac,border:"none",borderRadius:8,padding:"11px 18px",color:"#000",fontWeight:700,fontSize:14,cursor:"pointer"}},adding?"...":"加入")
+      ),
+      showEdit&&React.createElement("div",null,
+        React.createElement("div",{style:{fontSize:12,color:C.t2,marginBottom:8}},"點 ✕ 刪除（預設不可刪）"),
+        React.createElement("div",{style:{display:"flex",flexWrap:"wrap",gap:8}},
+          list.map((s,i)=>React.createElement("div",{key:i,style:{display:"flex",alignItems:"center",gap:6,background:C.bg3,border:`1px solid ${sel.code===s.code?C.ac:C.bd}`,borderRadius:8,padding:"7px 12px",cursor:"pointer"},onClick:()=>{setSel(s);setEdit(false);setInitAI(false);}},
+            React.createElement("span",{style:{fontSize:13,color:C.t0}},`${s.code} ${s.name}`),
+            !DEFAULT_STOCKS.find(d=>d.code===s.code)&&React.createElement("span",{onClick:e=>{e.stopPropagation();removeStock(s.code);},style:{color:C.r,fontSize:16,marginLeft:4,cursor:"pointer"}},"✕")
+          ))
+        )
+      )
+    ),
+
+    tab==="chart"&&React.createElement("div",{key:sel.code+initAI,style:{paddingTop:12}},React.createElement(Detail,{stock:sel,initShowAI:initAI})),
+    tab==="scan"&&React.createElement(SmartScan,{list,onSelectStock:onSelectFromScan}),
+    tab==="themes"&&React.createElement("div",{style:{padding:"16px"}},
+      React.createElement("div",{style:{fontSize:13,color:C.t2,marginBottom:16}},"點擊加入自選股"),
+      THEMES.map((t,i)=>React.createElement("div",{key:i,style:{background:C.bg1,border:`1px solid ${C.bd}`,borderRadius:12,padding:16,marginBottom:12}},
+        React.createElement("div",{style:{fontSize:16,fontWeight:700,marginBottom:12}},t.name),
+        React.createElement("div",{style:{display:"flex",gap:8,flexWrap:"wrap"}},
+          t.stocks.map((code,j)=>React.createElement("button",{key:j,onClick:()=>{const ns=list.find(s=>s.code===code)||{code,name:code,theme:t.name};if(!list.find(s=>s.code===code))setList(p=>[...p,ns]);setSel(ns);setTab("chart");},style:{background:C.bg3,border:`1px solid ${C.bd}`,borderRadius:8,padding:"9px 16px",color:C.t0,fontSize:14,cursor:"pointer",fontFamily:"inherit"}},code))
+        )
+      ))
+    ),
+    React.createElement("div",{style:{padding:"16px",textAlign:"center",fontSize:11,color:C.t2}},"Yahoo Finance · 證交所 · 三大法人每日 18:00 更新")
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(App));
+</script>
+</body>
+</html>

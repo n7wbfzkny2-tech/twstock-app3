@@ -24,7 +24,8 @@ button:active{transform:scale(0.97);}
 <script type="text/babel">
 const PROXY="https://twstock-proxy-psi.vercel.app/api/proxy";
 const GEMINI_KEY="AQ.Ab8RN6LVjo8Kyz1NaKzAS3ECY4mmlIpLw3-A5HB5J9s0EdePyw";
-const GEMINI_URL=`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_KEY}`;
+const GEMINI_URL=`${PROXY}?type=gemini`;
+
 
 const C={bg0:"#0a0c0f",bg1:"#0f1318",bg2:"#141921",bg3:"#1c2330",bd:"#1e2d3d",ac:"#f0a500",acD:"#f0a50022",g:"#00d084",gD:"#00d08422",r:"#ff3d57",rD:"#ff3d5722",b:"#2196f3",bD:"#2196f322",p:"#9c6eff",o:"#ff7043",t0:"#e8edf5",t1:"#8fa3b8",t2:"#4a6080"};
 

@@ -194,8 +194,9 @@ function calcSignals(kline,inst){
   else if(ss>=4){strength="sell";label="🟠 建議減碼";color=C.o;}
   else if(bs>=7){strength="strong_buy";label="✅ 強力買進";color=C.g;}
   else if(bs>=4){strength="buy";label="🟢 買進機會";color=C.g;}
-  else if(bs>=2){strength="watch_buy";label:"👀 偏多觀察";color=C.ac;}
-  else if(ss>=2){strength="watch_sell";label:"⚠️ 偏空注意";color=C.o;}
+  else if(bs>=2){strength="watch_buy";label="👀 偏多觀察";color=C.ac;}
+else if(ss>=2){strength="watch_sell";label="⚠️ 偏空注意";color=C.o;}
+
   else{strength="neutral";label="⬜ 盤整觀望";color=C.t1;}
   return{buy,sell,strength,label,color,buyScore:bs,sellScore:ss};
 }
